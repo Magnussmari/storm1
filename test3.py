@@ -1,0 +1,93 @@
+import os
+from argparse import ArgumentParser
+
+from knowledge_storm import STORMWikiRunnerArguments, STORMWikiRunner, STORMWikiLMConfigs
+from knowledge_storm.lm import OpenAIModel, AzureOpenAIModel
+from knowledge_storm.rm import YouRM, BingSearch, BraveRM
+from knowledge_storm.utils import load_api_key
+
+def main(args):
+    load_api_key(toml_file_path='secrets.toml')
+    lm_configs = STORMWikiLMConfigs()
+    openai_kwargs = {
+        'api_key': os.getenv("OPENAI_API_KEY"),
+        'temperature': 0.1,  # Lower temperature to reduce hallucinations
+        'top_p': 0.9,
+    }
+
+    ModelClass = OpenAIModel if os.getenv('OPENAI_API_TYPE') == 'openai' else AzureOpenAIModel
+    gpt_4o_model_name = 'gpt-4o'
+    gpt_4o_mini_model_name = 'gpt-4o-mini'
+
+    if os.getenv('OPENAI_API_TYPE') == 'azure':
+        openai_kwargs['api_base'] = os.getenv('AZURE_API_BASE')
+        openai_kwargs['api_version'] = os.getenv('AZURE_API_VERSION')
+
+    conv_simulator_lm = ModelClass(model=gpt_4o_mini_model_name, max_tokens=1000, **openai_kwargs)
+    question_asker_lm = ModelClass(model=gpt_4o_mini_model_name, max_tokens=1000, **openai_kwargs)
+    outline_gen_lm = ModelClass(model=gpt_4o_model_name, max_tokens=2000, **openai_kwargs)
+    article_gen_lm = ModelClass(model=gpt_4o_model_name, max_tokens=4000, **openai_kwargs)
+    article_polish_lm = ModelClass(model=gpt_4o_model_name, max_tokens=4000, **openai_kwargs)
+
+    lm_configs.set_conv_simulator_lm(conv_simulator_lm)
+    lm_configs.set_question_asker_lm(question_asker_lm)
+    lm_configs.set_outline_gen_lm(outline_gen_lm)
+    lm_configs.set_article_gen_lm(article_gen_lm)
+    lm_configs.set_article_polish_lm(article_polish_lm)
+
+    engine_args = STORMWikiRunnerArguments(
+        output_dir=args.output_dir,
+        max_conv_turn=10,
+        max_perspective=10,
+        search_top_k=15,  # Increase the number of search results to ensure more comprehensive coverage
+        max_thread_num=args.max_thread_num,
+    )
+
+    if args.retriever == 'bing':
+        rm = BingSearch(bing_search_api=os.getenv('BING_SEARCH_API_KEY'), k=engine_args.search_top_k)
+    elif args.retriever == 'you':
+        rm = YouRM(ydc_api_key=os.getenv('YDC_API_KEY'), k=engine_args.search_top_k)
+    elif args.retriever == 'brave':
+        rm = BraveRM(brave_search_api_key=os.getenv('BRAVE_API_KEY'), k=engine_args.search_top_k)
+
+    runner = STORMWikiRunner(engine_args, lm_configs, rm)
+
+    topic = "Exploring the etiology, diagnosis, and treatment advancements in Myalgic Encephalomyelitis/Chronic Fatigue Syndrome (ME/CFS) and its impact on patient care."
+    runner.run(
+        topic=topic,
+        do_research=args.do_research,
+        do_generate_outline=args.do_generate_outline,
+        do_generate_article=args.do_generate_article,
+        do_polish_article=args.do_polish_article,
+    )
+    runner.post_run()
+    runner.summary()
+
+if __name__ == '__main__':
+    parser = ArgumentParser()
+    parser.add_argument('--output-dir', type=str, default='./results/gpt',
+                        help='Directory to store the outputs.')
+    parser.add_argument('--max-thread-num', type=int, default=3,
+                        help='Maximum number of threads to use.')
+    parser.add_argument('--retriever', type=str, choices=['bing', 'you', 'brave'], default='you',
+                        help='The search engine API to use for retrieving information.')
+    parser.add_argument('--do-research', action='store_true', default=True,
+                        help='Simulate conversation to research the topic.')
+    parser.add_argument('--do-generate-outline', action='store_true', default=True,
+                        help='Generate an outline for the topic.')
+    parser.add_argument('--do-generate-article', action='store_true', default=True,
+                        help='Generate an article for the topic.')
+    parser.add_argument('--do-polish-article', action='store_true', default=True,
+                        help='Polish the article by adding a summarization section and removing duplicate content.')
+    parser.add_argument('--max-conv-turn', type=int, default=10,
+                        help='Maximum number of questions in conversational question asking.')
+    parser.add_argument('--max-perspective', type=int, default=10,
+                        help='Maximum number of perspectives to consider in perspective-guided question asking.')
+    parser.add_argument('--search-top-k', type=int, default=15,  # Increase to retrieve more data
+                        help='Top k search results to consider for each search query.')
+    parser.add_argument('--retrieve-top-k', type=int, default=3,
+                        help='Top k collected references for each section title.')
+    parser.add_argument('--remove-duplicate', action='store_true', default=True,
+                        help='Remove duplicate content from the article.')
+
+    main(parser.parse_args())
